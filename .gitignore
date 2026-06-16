@@ -1,0 +1,13 @@
+# local, may contain Jira API tokens — never commit
+config.json
+.env
+
+# runtime
+server.log
+__pycache__/
+*.pyc
+
+# scratch
+*.png
+*.jpg
+.DS_Store
