@@ -31,20 +31,28 @@ view. Runs entirely on `127.0.0.1` — your tokens never leave your machine.
 
 ## Install
 
-```bash
-git clone <this-repo> ~/command-center
-cd ~/command-center
-./install.sh
-./cc            # starts the local server and opens it in your browser
-```
-
-To launch from anywhere with one command, add the alias the installer prints:
+One line — clones, sets up, adds a `dash` alias, and opens the dashboard:
 
 ```bash
-alias dash="$HOME/command-center/cc"
+curl -fsSL https://raw.githubusercontent.com/freekos/command-center/main/install.sh | bash
 ```
 
-`./cc` is idempotent — if the server is already up it just opens the dashboard.
+Then, from any terminal:
+
+```bash
+dash            # starts the local server (if needed) and opens it in your browser
+```
+
+Prefer to clone yourself? Same result:
+
+```bash
+git clone https://github.com/freekos/command-center.git ~/command-center
+cd ~/command-center && ./install.sh
+```
+
+`dash` (and `./cc`) are idempotent — if the server is already up they just open
+the dashboard. The installer only appends an alias to your shell rc if one isn't
+already there; nothing else about your environment is touched.
 
 ## Usage
 
