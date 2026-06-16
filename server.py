@@ -18,13 +18,14 @@ Render depends on the project's tracker:
 Loads async (fetch) so there is no page-reload feel.
 config.json holds tokens -> it is chmod 600 and must stay local (never commit).
 """
-import json, os, re, subprocess, urllib.request, urllib.parse, base64, html, time, pathlib, threading
+import json, os, re, sys, subprocess, urllib.request, urllib.parse, base64, html, time, pathlib, threading, hmac, hashlib, secrets, http.cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = pathlib.Path(__file__).parent
 CONFIG = HERE / "config.json"
 LEGACY_ENV = HERE / ".env"
 PORT = int(os.environ.get("CC_PORT", "8787"))
+HOST = os.environ.get("CC_HOST", "")  # resolved in __main__ (config "bind" or 127.0.0.1)
 TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
 DEFAULT_TICKET = r"[A-Z][A-Z0-9]+-\d+"
 STATUS_COLOR = {"done": "#1f9d55", "indeterminate": "#d9a400", "new": "#6b7280"}
@@ -62,6 +63,48 @@ def load_config():
 def save_config(cfg):
     CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
     os.chmod(CONFIG, 0o600)
+
+
+# ---------- auth (passcode gate; needed once the dashboard is reachable off-localhost) ----------
+def auth_cfg():
+    return load_config().get("auth") or {}
+
+
+def auth_enabled():
+    return bool(auth_cfg().get("passcode_sha256"))
+
+
+def _server_secret():
+    a = auth_cfg()
+    if a.get("secret"):
+        return a["secret"]
+    cfg = load_config()
+    s = secrets.token_hex(16)
+    cfg.setdefault("auth", {})["secret"] = s
+    save_config(cfg)
+    return s
+
+
+def session_token():
+    return hmac.new(_server_secret().encode(), b"cc-session-v1", hashlib.sha256).hexdigest()
+
+
+def check_passcode(pc):
+    return bool(pc) and hashlib.sha256(pc.encode()).hexdigest() == auth_cfg().get("passcode_sha256")
+
+
+def set_passcode(pc):
+    cfg = load_config()
+    a = cfg.setdefault("auth", {})
+    a["passcode_sha256"] = hashlib.sha256(pc.encode()).hexdigest()
+    a.setdefault("secret", secrets.token_hex(16))
+    save_config(cfg)
+
+
+def set_bind(host):
+    cfg = load_config()
+    cfg["bind"] = host
+    save_config(cfg)
 
 
 # ---------- repo discovery (within a project's folder) ----------
@@ -377,6 +420,25 @@ a.link{color:#58a6ff}
 .muted{color:#6b7280;font-size:11px}
 #toast{position:fixed;top:14px;right:14px;background:#1f9d55;color:#fff;padding:9px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(-6px);transition:.2s;pointer-events:none;z-index:60}
 #toast.show{opacity:1;transform:none}
+@media (max-width:600px){
+  body{padding:12px}
+  h1{font-size:17px}
+  .top{gap:8px}
+  select{flex:1 1 auto;min-width:0;font-size:16px;padding:10px 12px}
+  .top .btn{padding:10px 12px}
+  .bar{gap:8px}
+  .bar .btn{flex:1 1 auto;text-align:center}
+  .epic>summary,.repo>summary{padding:14px 14px;font-size:15px}
+  .epic-body,.repo-body{padding:0 12px 12px}
+  .task>summary,.task.flat{padding:10px 0}
+  .t-sum{white-space:normal}
+  .mr{width:100%;flex-wrap:wrap}
+  .overlay{padding:16px}
+  .modal{padding:18px}
+  input[type=text],input[type=email],input[type=password]{font-size:16px}
+  .modal-actions{gap:8px}
+  .modal-actions .btn{flex:1 1 auto;text-align:center}
+}
 """
 
 
@@ -458,6 +520,21 @@ def vcs_content(proj, by_repo, prune_n):
     return f'<div class="meta">{esc(proj["name"])} · VCS (без Jira) · обновлено {now}</div>{bar_html(prune_n)}{"".join(secs)}'
 
 
+def render_login(error=""):
+    bn = f'<p style="color:#ffb3b3;font-size:13px;margin:0 0 10px">{esc(error)}</p>' if error else ""
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Командный центр — вход</title>
+<style>{CSS}</style></head><body>
+<div class="modal" style="max-width:360px;margin:16vh auto">
+  <h2>Командный центр</h2>
+  <p class="desc">Введи пасскод для доступа.</p>{bn}
+  <form method="post" action="/login">
+    <label>Пасскод</label><input type="password" name="passcode" autofocus required>
+    <div class="modal-actions"><span class="spacer"></span><button class="btn primary">Войти</button></div>
+  </form>
+</div></body></html>"""
+
+
 def render_shell(active, projects):
     dsite = load_config().get("default_jira_site") or ""  # optional, set in config.json
     opts = "".join(
@@ -535,6 +612,7 @@ async function load(){{
   c.innerHTML='<div class="loader"><span class="ring"></span>Загружаю «'+CUR+'»…</div><div class="skel"></div><div class="skel"></div><div class="skel"></div>';
   const want=CUR;
   try{{const r=await fetch('/api/content?project='+encodeURIComponent(want));
+    if(r.status===401){{location.href='/login';return;}}
     const html=await r.text();
     if(want!==CUR)return;            // user switched again mid-load — drop stale result
     c.innerHTML=html;}}
@@ -672,11 +750,13 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, code=200, ctype="text/html; charset=utf-8"):
+    def _send(self, body, code=200, ctype="text/html; charset=utf-8", headers=None):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
+        for k, v in (headers or []):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(b)
 
@@ -690,9 +770,26 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _form(self):
+        n = int(self.headers.get("Content-Length", 0))
+        return urllib.parse.parse_qs(self.rfile.read(n).decode())
+
+    def _authed(self):
+        if not auth_enabled():
+            return True
+        c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
+        tok = c["cc_session"].value if "cc_session" in c else ""
+        return hmac.compare_digest(tok, session_token())
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         p, q = u.path, urllib.parse.parse_qs(u.query)
+
+        if p == "/login":
+            return self._send(render_login())
+        if not self._authed():
+            return self._send("auth required", 401) if p.startswith("/api/") else self._send(render_login())
+
         projects = get_projects()
 
         if p == "/api/content":
@@ -736,6 +833,16 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
+
+        if u.path == "/login":
+            pc = (self._form().get("passcode") or [""])[0]
+            if check_passcode(pc):
+                cookie = f"cc_session={session_token()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7776000"
+                return self._send("", 303, headers=[("Location", "/"), ("Set-Cookie", cookie)])
+            return self._send(render_login("Неверный пасскод"))
+
+        if not self._authed():
+            return self._send("auth required", 401)
 
         if u.path == "/api/add-project":
             d = self._body()
@@ -805,5 +912,23 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == "passcode":
+            import getpass
+            pw = getpass.getpass("Новый пасскод: ").strip()
+            if not pw:
+                print("пусто — отмена"); sys.exit(1)
+            set_passcode(pw); print("✓ пасскод задан"); sys.exit(0)
+        if cmd == "bind":
+            host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+            set_bind(host); print(f"✓ bind = {host}"); sys.exit(0)
+        print("usage: server.py [passcode | bind <host>]"); sys.exit(1)
+
+    host = HOST or load_config().get("bind") or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1") and not auth_enabled():
+        print(f"⚠ Отказ: bind={host} (доступ по сети) без пасскода. Сначала задай: cc passcode")
+        sys.exit(1)
     threading.Thread(target=warm_loop, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    print(f"Command Center → http://{host}:{PORT}  (auth: {'on' if auth_enabled() else 'off'})")
+    ThreadingHTTPServer((host, PORT), H).serve_forever()

@@ -50,6 +50,25 @@ case "${1:-open}" in
     stop; echo "✓ остановлен" ;;
   status)
     is_up && echo "✓ работает → $URL" || echo "✗ не запущен" ;;
+  passcode)
+    "${PY:-python3}" "$DIR/server.py" passcode ;;
+  expose)
+    "${PY:-python3}" "$DIR/server.py" bind 0.0.0.0
+    echo "▶ Перезапуск с доступом по сети…"; stop; sleep 1
+    if start; then
+      echo "✓ Доступен по сети на :$PORT"
+      if command -v tailscale >/dev/null 2>&1; then
+        ip="$(tailscale ip -4 2>/dev/null | head -1)"
+        [ -n "$ip" ] && echo "  Tailscale: http://$ip:$PORT  (открой с телефона)"
+      fi
+      command -v ipconfig >/dev/null 2>&1 && echo "  LAN: http://$(ipconfig getifaddr en0 2>/dev/null):$PORT"
+    else
+      echo "❌ не поднялся — вероятно не задан пасскод. Сначала: cc passcode"; exit 1
+    fi ;;
+  local)
+    "${PY:-python3}" "$DIR/server.py" bind 127.0.0.1
+    echo "▶ Перезапуск (только локально)…"; stop; sleep 1
+    start && echo "✓ только 127.0.0.1 → $URL" || { echo "❌ не поднялся"; exit 1; } ;;
   *)
-    echo "cc [open|update|restart|stop|status]" ;;
+    echo "cc [open|update|restart|stop|status|passcode|expose|local]" ;;
 esac
