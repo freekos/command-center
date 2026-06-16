@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Command Center launcher — vibe-kanban-style:
-#   one command -> start local server (if not already up) -> open it in the browser.
-# Idempotent: re-running just opens the dashboard (no double-start).
+# Command Center launcher.
+#   cc            start (if needed) + open in the browser
+#   cc update     git pull + restart + open      (updating the tool)
+#   cc restart    restart the server
+#   cc stop       stop the server
+#   cc status     is it running?
+# The server is started detached so it survives this terminal closing.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -10,32 +14,42 @@ URL="http://127.0.0.1:${PORT}"
 PY="$(command -v python3 || true)"
 LOG="$DIR/server.log"
 
-[ -n "$PY" ] || { echo "❌ python3 не найден в PATH"; exit 1; }
-[ -f "$DIR/server.py" ] || { echo "❌ нет $DIR/server.py"; exit 1; }
+is_up(){ curl -s -m 2 -o /dev/null "$URL/" 2>/dev/null; }
+stop(){ lsof -ti "tcp:$PORT" 2>/dev/null | xargs kill 2>/dev/null || true; }
+start(){
+  [ -n "$PY" ] || { echo "❌ python3 не найден"; exit 1; }
+  [ -f "$DIR/server.py" ] || { echo "❌ нет $DIR/server.py"; exit 1; }
+  ( cd "$DIR" && CC_PORT="$PORT" nohup "$PY" server.py >>"$LOG" 2>&1 & disown ) || true
+  for _ in $(seq 1 50); do is_up && return 0; sleep 0.2; done
+  return 1
+}
+open_browser(){
+  if command -v open >/dev/null 2>&1; then open "$URL"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL"; fi
+}
 
-is_up() { curl -s -m 2 -o /dev/null "$URL/" 2>/dev/null; }
-
-if is_up; then
-  echo "✓ Командный центр уже работает → $URL"
-else
-  echo "▶ Поднимаю Командный центр на :$PORT …"
-  # detached so it survives this terminal closing (real persistence for a login session)
-  ( cd "$DIR" && nohup "$PY" server.py >>"$LOG" 2>&1 & disown ) || true
-  # wait up to ~10s for it to answer
-  for _ in $(seq 1 50); do
-    if is_up; then break; fi
-    sleep 0.2
-  done
-  if is_up; then
-    echo "✓ Готов → $URL"
-  else
-    echo "❌ сервер не ответил, лог: $LOG"; tail -n 20 "$LOG" 2>/dev/null || true; exit 1
-  fi
-fi
-
-# open in the system default browser (bypasses cmux internal browser)
-if command -v open >/dev/null 2>&1; then
-  open "$URL"
-elif command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "$URL"
-fi
+case "${1:-open}" in
+  open|"")
+    if is_up; then echo "✓ Командный центр уже работает → $URL"
+    else echo "▶ Поднимаю на :$PORT …"; start || { echo "❌ не ответил, лог: $LOG"; tail -n 15 "$LOG" 2>/dev/null||true; exit 1; }; echo "✓ Готов → $URL"; fi
+    open_browser ;;
+  update)
+    if [ -d "$DIR/.git" ]; then
+      echo "▶ Обновляю код (git pull)…"
+      git -C "$DIR" pull --ff-only && echo "✓ Код обновлён ($(git -C "$DIR" rev-parse --short HEAD))"
+    else
+      echo "⚠ $DIR — не git-репозиторий, обновить через git нельзя."
+      echo "  Переустанови: curl -fsSL https://raw.githubusercontent.com/freekos/command-center/main/install.sh | bash"
+    fi
+    echo "▶ Перезапускаю сервер…"; stop; sleep 1
+    start && { echo "✓ Готов → $URL"; open_browser; } || { echo "❌ не поднялся, лог: $LOG"; exit 1; } ;;
+  restart)
+    echo "▶ Перезапуск…"; stop; sleep 1
+    start && echo "✓ $URL" || { echo "❌ не поднялся"; exit 1; } ;;
+  stop)
+    stop; echo "✓ остановлен" ;;
+  status)
+    is_up && echo "✓ работает → $URL" || echo "✗ не запущен" ;;
+  *)
+    echo "cc [open|update|restart|stop|status]" ;;
+esac

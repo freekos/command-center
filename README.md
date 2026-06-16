@@ -54,6 +54,17 @@ cd ~/command-center && ./install.sh
 the dashboard. The installer only appends an alias to your shell rc if one isn't
 already there; nothing else about your environment is touched.
 
+## Updating
+
+The install lives in `~/.command-center` as a git clone, so updating is one command:
+
+```bash
+dash update      # git pull + restart the server + reopen
+```
+
+Re-running the install one-liner does the same (it fast-forwards an existing
+clone). Other commands: `dash restart`, `dash stop`, `dash status`.
+
 ## Usage
 
 1. Open the dashboard, click **＋ Проект**.
